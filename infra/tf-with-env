@@ -1,0 +1,35 @@
+#!/bin/bash
+# Wrapper that loads OpenStack + Tailscale credentials before invoking terraform.
+# Usage: ./tf-with-env <terraform-dir> <cmd> [args...]
+#   e.g. ./tf-with-env terraform/dev plan
+#        ./tf-with-env terraform/dev apply -auto-approve
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SECRETS="$REPO_ROOT/secrets/tailscale-authkeys.env"
+CLOUDS="${OS_CLIENT_CONFIG_FILE:-/mnt/d/priv/code/PCU-9UAH2PR-clouds.yaml}"
+
+if [ ! -f "$SECRETS" ]; then
+  echo "ERROR: $SECRETS not found. Generate Tailscale auth keys first." >&2
+  exit 1
+fi
+if [ ! -f "$CLOUDS" ]; then
+  echo "ERROR: clouds.yaml not found at $CLOUDS. Set OS_CLIENT_CONFIG_FILE." >&2
+  exit 1
+fi
+
+# Load Tailscale auth keys from gitignored secrets file
+set -a
+. "$SECRETS"
+set +a
+
+# Map TS_AUTHKEY_* -> TF_VAR_ts_authkey_* (Terraform's lowercase, underscored convention)
+export TF_VAR_ts_authkey_dev="${TS_AUTHKEY_DEV:-}"
+export TF_VAR_ts_authkey_lab_linux="${TS_AUTHKEY_LAB_LINUX:-}"
+export TF_VAR_ts_authkey_lab_windows="${TS_AUTHKEY_LAB_WINDOWS:-}"
+export OS_CLIENT_CONFIG_FILE="$CLOUDS"
+export PATH="$HOME/bin:$PATH"
+
+DIR="$1"; shift
+cd "$REPO_ROOT/infra/$DIR"
+exec terraform "$@"

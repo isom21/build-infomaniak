@@ -1,0 +1,67 @@
+# Ansible playbook for the dev host.
+#
+# This is intentionally a thin layer on top of cloud-init. cloud-init does
+# the heavy first-boot install (Tailscale, Docker, Node, Claude Code, Rust);
+# this playbook is for *idempotent re-runs* — pulling repo updates, refreshing
+# toolchain versions, adjusting config — without recreating the VM.
+#
+# Usage:
+#   cd infra/ansible
+#   ansible-playbook -i inventory.yml dev.yml
+#
+# Add tasks here as the dev host grows.
+
+- name: Configure edr-cloudlab dev host
+  hosts: dev
+  become: true
+
+  tasks:
+    - name: Ensure dev user is in docker group
+      ansible.builtin.user:
+        name: dev
+        groups: docker
+        append: true
+
+    - name: Verify cloud-init bootstrap marker exists
+      ansible.builtin.stat:
+        path: /var/lib/edr-cloudlab-bootstrap-complete
+      register: bootstrap_marker
+      failed_when: not bootstrap_marker.stat.exists
+
+    - name: Show bootstrap completion timestamp
+      ansible.builtin.command: cat /var/lib/edr-cloudlab-bootstrap-complete
+      register: bootstrap_ts
+      changed_when: false
+
+    - name: Bootstrap timestamp
+      ansible.builtin.debug:
+        msg: "dev host bootstrapped at {{ bootstrap_ts.stdout }}"
+
+    - name: Verify required tooling
+      ansible.builtin.command: "{{ item }} --version"
+      register: tool_versions
+      changed_when: false
+      loop:
+        - docker
+        - node
+        - npm
+        - claude
+        - tailscale
+      become_user: dev
+
+    - name: Tool versions
+      ansible.builtin.debug:
+        msg: "{{ item.cmd[0] }}: {{ item.stdout_lines[0] | default(item.stderr_lines[0] | default('?')) }}"
+      loop: "{{ tool_versions.results }}"
+      loop_control:
+        label: "{{ item.cmd[0] }}"
+
+    - name: Verify Rust toolchain (as dev user)
+      ansible.builtin.command: /home/dev/.cargo/bin/rustc --version
+      become_user: dev
+      register: rustc_version
+      changed_when: false
+
+    - name: Rust version
+      ansible.builtin.debug:
+        msg: "rustc: {{ rustc_version.stdout }}"

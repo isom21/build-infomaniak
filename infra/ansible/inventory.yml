@@ -1,0 +1,19 @@
+# Ansible inventory — uses Tailscale MagicDNS hostnames.
+# Run from a machine that's enrolled in the tailnet.
+#
+# Quickstart:
+#   1. Enroll your laptop (see docs/05-tailscale-setup.md step 1.4).
+#   2. Confirm `ssh dev` works (Tailscale SSH; no key needed, identity from tailnet).
+#   3. ansible-playbook -i inventory.yml dev.yml
+
+all:
+  hosts:
+    dev:
+      ansible_host: dev          # Tailscale MagicDNS resolves this on the tailnet
+      ansible_user: dev
+      ansible_python_interpreter: /usr/bin/python3
+      # Tailscale SSH means no need for ansible_ssh_private_key_file —
+      # tailnet membership is the auth boundary. If your client doesn't have
+      # Tailscale SSH support, fall back to:
+      #   ansible_ssh_private_key_file: ../../secrets/edr-dev.key
+      #   ansible_user: dev
