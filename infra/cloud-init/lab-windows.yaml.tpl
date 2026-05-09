@@ -1,51 +1,39 @@
 #ps1
-# `#ps1` MUST be line 1. It dispatches to plain `powershell.exe` (works for
-# both 32- and 64-bit cloudbase-init). The `#ps1_sysnative` variant only
-# works from 32-bit cloudbase-init and silently hangs otherwise.
+# edr-cloudlab Windows lab — outer cloudbase-init wrapper.
+#
+# Cloudbase-init runs in SYSTEM context very early in boot, when many
+# Windows services (Windows Update, BITS, TrustedInstaller, msiserver) are
+# not yet running. Tailscale's MSI returns 1603 and Add-WindowsCapability
+# hangs for an hour waiting on wuauserv.
+#
+# We sidestep both by:
+#   1) Enabling RDP immediately (so the operator always has emergency access)
+#   2) Writing the real bootstrap script to C:\edr-inner.ps1
+#   3) Registering a scheduled task that runs it ~3 min from now, by which
+#      time Windows is fully up.
+# The outer then exits and cloudbase-init returns cleanly.
 
 $ErrorActionPreference = "Continue"
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$log = "C:\edr-bootstrap.log"
-function L($m) { "$(Get-Date -Format o) $m" | Add-Content $log }
+# (1) RDP — emergency access, before anything else.
+Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0 -ErrorAction Continue
+Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction Continue
 
-L "=== START ==="
-L "PS $($PSVersionTable.PSVersion)"
+"$(Get-Date -Format o) outer wrapper start user=$env:USERNAME pid=$PID" | Out-File -FilePath C:\edr-outer.log -Append
 
-# Enable OpenSSH Server (debug ingress; SG also needs TCP/22 open)
-L "OpenSSH: install"
-Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction Continue | Out-Null
-L "OpenSSH: start service"
-Set-Service sshd -StartupType Automatic -ErrorAction Continue
-Start-Service sshd -ErrorAction Continue
-L "OpenSSH: firewall"
-New-NetFirewallRule -Name sshd -DisplayName 'OpenSSH SSH Server' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 -ErrorAction Continue | Out-Null
-L "OpenSSH status: $((Get-Service sshd -ErrorAction Continue).Status)"
+# (2) Decode inner from base64 and write to disk.
+$inner = "C:\edr-inner.ps1"
+$b64   = "${inner_b64}"
+$bytes = [Convert]::FromBase64String($b64)
+$text  = [Text.Encoding]::UTF8.GetString($bytes)
+[IO.File]::WriteAllText($inner, $text, (New-Object Text.UTF8Encoding($false)))
+"$(Get-Date -Format o) inner written ($($bytes.Length) bytes) to $inner" | Out-File -FilePath C:\edr-outer.log -Append
 
-# Install Tailscale
-$msi = "$env:TEMP\ts.msi"
-L "Tailscale: download MSI"
-try {
-  Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile $msi -UseBasicParsing -TimeoutSec 120
-  L "Tailscale: downloaded $((Get-Item $msi).Length) bytes"
-} catch {
-  L "Tailscale: download FAILED: $($_.Exception.Message)"
-}
-
-L "Tailscale: install MSI"
-$proc = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /quiet /norestart" -Wait -PassThru -ErrorAction Continue
-L "Tailscale: msiexec exit=$($proc.ExitCode)"
-
-$tsExe = "C:\Program Files\Tailscale\tailscale.exe"
-L "Tailscale: exe present=$(Test-Path $tsExe)"
-
-if (Test-Path $tsExe) {
-  L "Tailscale: up"
-  $out = & $tsExe up --auth-key="${ts_authkey}" --hostname=lab-windows --advertise-tags=tag:lab-windows --unattended 2>&1
-  L "Tailscale up output: $out"
-  $st = & $tsExe status 2>&1
-  L "Tailscale status: $st"
-}
-
-"$(Get-Date -Format o)" | Set-Content C:\edr-bootstrap-complete
-L "=== END ==="
+# (3) Schedule the inner to run in ~3 minutes as SYSTEM with highest privileges.
+$argString = "-NoProfile -ExecutionPolicy Bypass -File `"$inner`""
+$action    = New-ScheduledTaskAction    -Execute "powershell.exe" -Argument $argString
+$trigger   = New-ScheduledTaskTrigger   -Once -At ((Get-Date).AddMinutes(3))
+$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
+$settings  = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
+Register-ScheduledTask -TaskName "edr-cloudlab-bootstrap" -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+"$(Get-Date -Format o) scheduled task registered to fire at $((Get-Date).AddMinutes(3).ToString('o'))" | Out-File -FilePath C:\edr-outer.log -Append

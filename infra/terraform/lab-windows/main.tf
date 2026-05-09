@@ -59,8 +59,21 @@ data "openstack_networking_secgroup_v2" "lab" {
 }
 
 locals {
+  # Public keys that get installed as Administrator's authorized_keys so SSH
+  # works without password from any host that has the matching private key.
+  # edr-dev.key.pub      = ed25519 keypair (also used for OpenStack lab-linux SSH)
+  # edr-dev-rsa.key.pub  = RSA keypair (also used for cloudbase-init password encrypt)
+  ssh_pubkeys = join("\n", [
+    trimspace(file("${path.module}/../../../secrets/edr-dev.key.pub")),
+    trimspace(file("${path.module}/../../../secrets/edr-dev-rsa.key.pub")),
+  ])
+
+  inner_script = templatefile("${path.module}/../../cloud-init/lab-windows-inner.ps1.tpl", {
+    ts_authkey  = var.ts_authkey_lab_windows
+    ssh_pubkeys = local.ssh_pubkeys
+  })
   user_data = templatefile("${path.module}/../../cloud-init/lab-windows.yaml.tpl", {
-    ts_authkey = var.ts_authkey_lab_windows
+    inner_b64 = base64encode(local.inner_script)
   })
 }
 

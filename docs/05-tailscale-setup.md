@@ -71,6 +71,14 @@ Tailscale identifies machines by **tags**, not user accounts. Tags are claimed a
          "dst":    ["tag:dev:*"],
        },
 
+       // Laptop can reach lab VMs directly (RDP, SSH, ad-hoc tools).
+       // Mobile is intentionally NOT granted lab access.
+       {
+         "action": "accept",
+         "src":    ["tag:laptop"],
+         "dst":    ["tag:lab-linux:*", "tag:lab-windows:*"],
+       },
+
        // Dev host can reach lab VMs on any port (SSH, kdnet, RDP, etc).
        // kdnet uses UDP/50000 by default — covered by "*".
        {
@@ -94,6 +102,13 @@ Tailscale identifies machines by **tags**, not user accounts. Tags are claimed a
          "src":    ["tag:laptop"],
          "dst":    ["tag:dev"],
          "users":  ["root", "dev"],
+       },
+       // Tailscale SSH from laptop to Linux lab (cloud-init enables `--ssh`).
+       {
+         "action": "accept",
+         "src":    ["tag:laptop"],
+         "dst":    ["tag:lab-linux"],
+         "users":  ["root", "ubuntu"],
        },
      ],
 
