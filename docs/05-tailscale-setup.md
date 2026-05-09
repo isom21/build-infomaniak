@@ -110,6 +110,13 @@ Tailscale identifies machines by **tags**, not user accounts. Tags are claimed a
          "dst":    ["tag:lab-linux"],
          "users":  ["root", "ubuntu"],
        },
+       // Tailscale SSH from dev to Linux lab — keyless from the dev host.
+       {
+         "action": "accept",
+         "src":    ["tag:dev"],
+         "dst":    ["tag:lab-linux"],
+         "users":  ["root", "ubuntu"],
+       },
      ],
 
      // Auto-approve the dev host advertising itself as an exit node,

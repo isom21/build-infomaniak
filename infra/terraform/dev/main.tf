@@ -56,9 +56,15 @@ data "openstack_images_image_v2" "ubuntu" {
 }
 
 locals {
+  # Private key for dev → lab SSH. Same keypair the labs trust (via
+  # OpenStack keypair injection on lab-linux, via authorized_keys install
+  # on lab-windows). Base64-encoded for cloud-init's write_files.
+  ssh_private_key_b64 = base64encode(file("${path.module}/../../../secrets/edr-dev.key"))
+
   user_data = templatefile("${path.module}/../../cloud-init/dev.yaml.tpl", {
-    ssh_pubkey = trimspace(file("${path.module}/../../../secrets/edr-dev.key.pub"))
-    ts_authkey = var.ts_authkey_dev
+    ssh_pubkey          = trimspace(file("${path.module}/../../../secrets/edr-dev.key.pub"))
+    ssh_private_key_b64 = local.ssh_private_key_b64
+    ts_authkey          = var.ts_authkey_dev
   })
 }
 

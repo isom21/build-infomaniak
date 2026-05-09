@@ -41,6 +41,39 @@ write_files:
     content: |
       export EDITOR=vim
 
+  # Pre-install the edr-dev private key + ssh config so `ssh lab-linux`
+  # and `ssh lab-windows` from the dev user just work (no flags, no agent
+  # forwarding). Same keypair the labs trust.
+  - path: /home/dev/.ssh/edr-dev
+    owner: 'dev:dev'
+    permissions: '0600'
+    encoding: b64
+    content: ${ssh_private_key_b64}
+
+  - path: /home/dev/.ssh/edr-dev.pub
+    owner: 'dev:dev'
+    permissions: '0644'
+    content: |
+      ${ssh_pubkey}
+
+  - path: /home/dev/.ssh/config
+    owner: 'dev:dev'
+    permissions: '0600'
+    content: |
+      Host lab-linux
+        HostName lab-linux
+        User ubuntu
+        IdentityFile ~/.ssh/edr-dev
+        IdentitiesOnly yes
+        StrictHostKeyChecking accept-new
+
+      Host lab-windows
+        HostName lab-windows
+        User Administrator
+        IdentityFile ~/.ssh/edr-dev
+        IdentitiesOnly yes
+        StrictHostKeyChecking accept-new
+
   - path: /usr/local/sbin/install-rust-as-dev.sh
     permissions: '0755'
     content: |
@@ -60,6 +93,10 @@ write_files:
       npm install -g @anthropic-ai/claude-code
 
 runcmd:
+  # 0) Make sure dev's .ssh dir has correct ownership/perms (write_files
+  #    creates files but the parent dir might end up root-owned).
+  - [bash, -c, "chown -R dev:dev /home/dev/.ssh && chmod 700 /home/dev/.ssh"]
+
   # 1) Tailscale install + enroll (ssh-enabled, exit-node-advertised)
   - [bash, -c, "curl -fsSL https://tailscale.com/install.sh | sh"]
   - [bash, -c, "tailscale up --auth-key='${ts_authkey}' --hostname=dev --advertise-tags=tag:dev --ssh --advertise-exit-node --accept-routes"]
