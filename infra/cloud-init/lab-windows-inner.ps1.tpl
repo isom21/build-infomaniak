@@ -6,7 +6,8 @@
 $ErrorActionPreference = "Continue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$log = "C:\edr-bootstrap.log"
+$log    = "C:\edr-bootstrap.log"
+$labDir = "C:\ProgramData\edr-cloudlab"
 function L($m) { "$(Get-Date -Format o) $m" | Add-Content -Path $log }
 function Step($name, $block) {
     L ">>> $name"
@@ -16,6 +17,15 @@ function Step($name, $block) {
     } catch {
         L "!!! $name FAILED: $($_.Exception.Message)"
     }
+}
+# OpenSSH refuses to read administrators_authorized_keys (and we don't want a
+# plaintext auth key) unless ACLs are SYSTEM+Administrators only.
+function Write-SecureFile($path, $content) {
+    $dir = Split-Path $path -Parent
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    [System.IO.File]::WriteAllText($path, $content, (New-Object System.Text.UTF8Encoding $false))
+    icacls.exe $path /inheritance:r 2>&1 | Out-Null
+    icacls.exe $path /grant 'SYSTEM:F' /grant 'Administrators:F' 2>&1 | Out-Null
 }
 
 L "=== inner bootstrap (deferred) START ==="
@@ -60,19 +70,66 @@ Step "Tailscale: up" {
     & $tsExe status 2>&1 | ForEach-Object { L "  status: $_" }
 }
 
-# Resilience: keep the system daemon authenticated across interactive user logins.
-# Without these, the Tailscale GUI tray app can deauthenticate the unattended
-# session on first user RDP login and the device drops off the tailnet.
-Step "Tailscale: pin UnattendedMode in registry" {
+# Self-healing: a scheduled task runs every 5 min, checks tailscaled state,
+# re-runs `tailscale up` if BackendState != Running. Defends against the
+# Windows Tailscale GUI tray's habit of deauthenticating the unattended
+# session on interactive user logins.
+Step "Tailscale: persist auth key for self-healing" {
+    $keyFile = Join-Path $labDir "ts-authkey"
+    Write-SecureFile $keyFile "${ts_authkey}"
+    L "  $keyFile (SYSTEM+Administrators only)"
+}
+
+Step "Tailscale: install self-healing script" {
+    $heal = Join-Path $labDir "ts-heal.ps1"
+    # NOTE: heredoc is single-quoted, so PS vars inside don't expand here.
+    # Tailscale `up` args (hostname/tag) are duplicated from the bootstrap
+    # invocation above — keep them in sync if either changes.
+    $script = @'
+$ErrorActionPreference = "Continue"
+$ts  = "C:\Program Files\Tailscale\tailscale.exe"
+$log = "C:\ProgramData\edr-cloudlab\ts-heal.log"
+if ((Test-Path $log) -and (Get-Item $log).Length -gt 1MB) {
+    Move-Item -Path $log -Destination "$log.1" -Force -ErrorAction SilentlyContinue
+}
+function L($m) { "$(Get-Date -Format o) $m" | Add-Content $log }
+if (-not (Test-Path $ts)) { L "tailscale.exe missing"; exit 1 }
+$raw   = & $ts status --json 2>$null
+$state = if ($raw -match '"BackendState"\s*:\s*"([^"]+)"') { $Matches[1] } else { "Unknown" }
+if ($state -eq "Running") { exit 0 }
+$key = (Get-Content "C:\ProgramData\edr-cloudlab\ts-authkey" -Raw).Trim()
+L "BackendState=$state, re-running up"
+$out = & $ts up --auth-key=$key --hostname=lab-windows --advertise-tags=tag:lab-windows --unattended 2>&1
+L "up result: $out"
+'@
+    Set-Content -Path $heal -Value $script -Encoding UTF8
+    L "  $heal"
+}
+
+Step "Tailscale: register self-healing scheduled task (5-min interval)" {
+    $heal = Join-Path $labDir "ts-heal.ps1"
+    $action    = New-ScheduledTaskAction    -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$heal`""
+    $trigger   = New-ScheduledTaskTrigger   -Once -At ((Get-Date).AddMinutes(2)) -RepetitionInterval (New-TimeSpan -Minutes 5)
+    $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
+    $settings  = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 4)
+    Register-ScheduledTask -TaskName "edr-cloudlab-ts-heal" -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+    L "  scheduled task: edr-cloudlab-ts-heal (every 5 min as SYSTEM)"
+}
+
+Step "Tailscale: pin UnattendedMode + disable GUI everywhere" {
     if (-not (Test-Path 'HKLM:\SOFTWARE\Tailscale IPN')) {
         New-Item -Path 'HKLM:\SOFTWARE\Tailscale IPN' -Force | Out-Null
     }
     Set-ItemProperty -Path 'HKLM:\SOFTWARE\Tailscale IPN' -Name 'UnattendedMode' -Value 'always' -Force
-    L "  UnattendedMode: $((Get-ItemProperty 'HKLM:\SOFTWARE\Tailscale IPN' 'UnattendedMode' -ErrorAction Continue).UnattendedMode)"
-}
-Step "Tailscale: disable GUI tray auto-start" {
     Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -Name 'Tailscale-IPN' -Force -ErrorAction SilentlyContinue
     Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Run' -Name 'Tailscale-IPN' -Force -ErrorAction SilentlyContinue
+    # Disable Tailscale-installed scheduled tasks (logon-triggered GUI launchers); our heal task is exempt.
+    Get-ScheduledTask -TaskName 'Tailscale*' -ErrorAction SilentlyContinue |
+        Where-Object TaskName -ne 'edr-cloudlab-ts-heal' |
+        ForEach-Object {
+            Disable-ScheduledTask -TaskName $_.TaskName -TaskPath $_.TaskPath -ErrorAction Continue | Out-Null
+            L "  disabled task: $($_.TaskPath)$($_.TaskName)"
+        }
 }
 
 # 2) OpenSSH — should now work since update services are running
@@ -97,13 +154,8 @@ Step "OpenSSH: install Administrator authorized_keys" {
     $authKeys = @"
 ${ssh_pubkeys}
 "@
-    $sshDir   = "C:\ProgramData\ssh"
-    $authFile = Join-Path $sshDir "administrators_authorized_keys"
-    if (-not (Test-Path $sshDir)) { New-Item -ItemType Directory -Path $sshDir -Force | Out-Null }
-    [System.IO.File]::WriteAllText($authFile, $authKeys, (New-Object System.Text.UTF8Encoding $false))
-    # Required ACL: only SYSTEM + Administrators may read; OpenSSH refuses otherwise.
-    icacls.exe $authFile /inheritance:r 2>&1 | Out-Null
-    icacls.exe $authFile /grant 'Administrators:F' /grant 'SYSTEM:F' 2>&1 | Out-Null
+    $authFile = "C:\ProgramData\ssh\administrators_authorized_keys"
+    Write-SecureFile $authFile $authKeys
     L "  authorized_keys: $((Get-Item $authFile).Length) bytes, $($authKeys.Trim().Split([Environment]::NewLine).Count) keys"
 }
 
